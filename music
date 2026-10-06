@@ -7,7 +7,7 @@
 </style></head><body><main>
 <header class="debug-only"><p class="eyebrow">互動教具 · 第四週 · 範例 06</p><h1>音量控制與模擬器（支援麥克風）</h1><p>可用真實麥克風發聲，或使用鍵盤／滑桿模擬音量輸入。</p><p class="small">按下 <strong>[空白鍵 Space]</strong> 可隨時切換「除錯模式」與「全螢幕遊戲模式」。</p></header>
 <div class="layout"><section class="game" id="game" tabindex="0" aria-label="聲音模擬遊戲">
-<svg viewBox="0 0 1000 650" role="img" aria-label="旋轉方塊受到音量支撐，突然增幅使它換色">
+<svg viewBox="0 0 1000 650" role="img" aria-label="旋轉方塊受到音量支撐，突然增幅使體換色">
 <defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#e3ede8"/><stop offset="1" stop-color="#f7f3e9"/></linearGradient></defs><rect width="1000" height="650" fill="url(#sky)"/><circle cx="840" cy="100" r="45" fill="#e7d8b4"/><path d="M0 520 Q200 440 390 510 T760 490 T1000 510 V650 H0Z" fill="#d8e4d8"/>
 <g class="debug-only"><line x1="500" x2="500" y1="30" y2="580" stroke="#89a697" stroke-dasharray="6 10"/><text x="25" y="45" fill="#526b70" font-size="19">音量訊號輸入 → 聲音判斷 → 浮力／換色</text></g>
 <rect y="580" width="1000" height="70" fill="#c3cdbb"/><line x1="0" x2="1000" y1="580" y2="580" stroke="#6d8c75" stroke-width="4"/><ellipse id="shadow" cx="500" cy="583" rx="45" ry="9" fill="#3f6051" opacity=".18"/>
@@ -31,7 +31,6 @@
 const clamp=(n,a,b)=>Math.min(b,Math.max(a,n));
 const defaults={quiet:20,sound:40,gravity:120,lift:240,sensitivity:1,burst:12};
 
-// 發聲狀態採雙門檻；突然聲響另看短時間增幅
 class VoiceControl{
  constructor(){this.reset();}
  reset(){this.sounding=false;this.smoothed=null;this.history=[];this.last=null;this.cooldown=-Infinity;this.burstReady=false;this.settledSince=null;}
@@ -63,16 +62,141 @@ const colors=['#397866','#4b7796','#a16a40','#865e8b','#b15c62','#637d43'];
 const body={height:410,velocity:0,angle:0,spin:35};
 let held=false,pulseUntil=0,debug=true,lastFrame=null,lastUi=0,nextSpin=0,colorIndex=0,count=0,flashUntil=0;
 
-// 麥克風音量監控變數
 let micStream=null,audioCtx=null,analyser=null,micDataArray=null,isMicActive=false;
 
 async function initMicrophone(){
- if(isMicActive){
-  stopMicrophone();
-  return;
- }
+ if(isMicActive){stopMicrophone();return;}
  try{
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const source = audioCtx.createMediaStreamSource(micStream);
-  analyser = audioCtx
+  micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  const source=audioCtx.createMediaStreamSource(micStream);
+  analyser=audioCtx.createAnalyser();
+  analyser.fftSize=512;
+  source.connect(analyser);
+  micDataArray=new Uint8Array(analyser.frequencyBinCount);
+  isMicActive=true;
+  $('toggleMic').textContent='🎙️ 關閉真實麥克風';
+  $('toggleMic').classList.add('active');$('simVolume').disabled=true;
+ }catch(e){
+  alert('無法存取麥克風，請檢查瀏覽器權限設定。');
+  isMicActive=false;
+ }
+}
+
+function stopMicrophone(){
+ if(micStream){micStream.getTracks().forEach(track=>track.stop());}
+ if(audioCtx){audioCtx.close();}
+ micStream=null;audioCtx=null;analyser=null;micDataArray=null;isMicActive=false;
+ $('toggleMic').textContent='🎙️ 啟用真實麥克風';
+ $('toggleMic').classList.add('active');$('toggleMic').classList.remove('active');
+ if($('inputMode').value==='slider')$('simVolume').disabled=false;
+}
+
+function getRawInput(t){
+ if(isMicActive&&analyser){
+  analyser.getByteFrequencyData(micDataArray);
+  let sum=0;
+  for(let i=0;i<micDataArray.length;i++){sum+=micDataArray[i];}
+  let avg=sum/micDataArray.length;
+  return clamp(avg*2.2,0,100);
+ }
+ if(t<pulseUntil)return 95;
+ const mode=$('inputMode').value;
+ if(mode==='keyboard')return held?parseFloat($('keyVolume').value):0;
+ if(mode==='slider')return parseFloat($('simVolume').value);
+ return 0;
+}
+
+function updateUIValues(){
+ ['quiet','sound','gravity','lift','sensitivity','burst','keyVolume','simVolume'].forEach(id=>{
+  const el=$(id);if(el&&$(id+'Value'))$(id+'Value').textContent=el.value;
+ });
+ $('quietLine').style.left=params.quiet+'%';
+ $('soundLine').style.left=params.sound+'\%';$('quietLegend').textContent='安靜門檻：'+params.quiet;
+ $('soundLegend').textContent='發聲門檻：'+params.sound;
+}
+
+function syncParamsFromDOM(){
+ ['quiet','sound','gravity','lift','sensitivity','burst'].forEach(k=>{
+  params[k]=parseFloat($(k).value);
+ });
+ updateUIValues();
+}
+
+function logEvent(text){
+ const log=$('log');
+ const li=document.createElement('li');
+ li.textContent=text;
+ log.prepend(li);
+ if(log.children.length>5)log.removeChild(log.lastChild);
+}
+
+function loop(t){
+ if(!lastFrame)lastFrame=t;
+ const dt=Math.min(0.1,(t-lastFrame)/1000);
+ lastFrame=t;
+
+ syncParamsFromDOM();
+ const raw=getRawInput(t);
+ const res=voice.tick(raw,t,params);
+ const extent=physics(body,dt,res.force,params);
+
+ if(res.event){
+  count++;
+  colorIndex=(colorIndex+1)%colors.length;
+  $('cubeColor.style')?.fill; // dummy reference$('cubeColor').setAttribute('fill',colors[colorIndex]);
+  flashUntil=t+300;
+  logEvent(`[${new Date(t).toLocaleTimeString()}] 觸發換色！音量：${Math.round(raw)}`);
+ }
+
+ if(t-lastUi>80){
+  lastUi=t;
+  $('raw').textContent=Math.round(raw);$('fill.style').width=raw+'%';
+  $('smooth').textContent=res.volume.toFixed(1);$('rise').textContent=res.rise.toFixed(1);
+  $('force').textContent=Math.round(res.force);$('count').textContent=count;
+  $('gateState').textContent=res.sounding?'發聲中':'安靜';
+  $('gateState').style.color=res.sounding?'#b15c62':'#286a5c';
+  $('eventState').textContent=res.eventState;
+ }
+
+ $('cube').setAttribute('transform',`translate(500,${650-body.height}) rotate(${body.angle})`);
+ $('shadow').setAttribute('cx',500);$('shadow.style').opacity=clamp(0.05+0.15*(1-body.height/550),0.02,0.2);
+
+ requestAnimationFrame(loop);
+}
+
+window.addEventListener('DOMContentLoaded',()=>{
+ updateUIValues();
+ $('toggleMic').addEventListener('click',initMicrophone);$('inputMode').addEventListener('change',e=>{
+  const isSlider=(e.target.value==='slider');
+  $('simVolume').disabled=isSlider&&!isMicActive?false:true;
+ });
+ window.addEventListener('keydown',e=>{
+  if(e.code==='Space'){
+   e.preventDefault();
+   debug=!debug;
+   document.body.classList.toggle('play',!debug);
+  }
+  if(e.code==='ArrowUp'){
+   held=true;
+   $('keyState').textContent='向上鍵已按下（發聲中）。';
+   $('keyState').classList.add('active-key');
+  }
+ });
+ window.addEventListener('keyup',e=>{
+  if(e.code==='ArrowUp'){
+   held=false;
+   $('keyState').textContent='向上鍵尚未按下。';
+   $('keyState').classList.remove('active-key');
+  }
+ });
+ $('pulse').addEventListener('click',()=>{pulseUntil=performance.now()+200;});
+ $('silence').addEventListener('click',()=>{voice.reset();held=false;pulseUntil=0;});$('restart').addEventListener('click',()=>{body.height=410;body.velocity=0;count=0;colorIndex=0;$('cubeColor').setAttribute('fill',colors[0]);voice.reset();$('log').innerHTML='<li>已重新遊玩。</li>'});
+ $('defaults').addEventListener('click',()=>{
+  Object.keys(defaults).forEach(k=>$(k).value=defaults[k]);
+  syncParamsFromDOM();
+ });
+ requestAnimationFrame(loop);
+});
+</script>
+</body></html>
